@@ -10,77 +10,89 @@ const io = require('socket.io')(server, {
 const port = process.env.PORT || 4000;
 let salas = new Map();
 io.on('connection', (socket) => {
-    socket.on('unirse', (code) => {
-        io.emit('validar', { valid: salas.has(code), code });
+    socket.on('enviar-nombre', (data) => {
+        console.log('name: ' + socket.id);
+        socket.join(data.codigo);
+        socket.sala = data.codigo;
+        if (salas.has(data.codigo)) {
+            const sala = salas.get(data.codigo);
+            const user = sala.users.find(x => x.name == data.name);
+            if (sala.enJuego) socket.emit('en-juego');
+            if (user) return socket.emit('nombre-repetido');
+            sala.users.push({ id: socket.id, name: data.name });
+        } else {
+            salas.set(data.codigo, {
+                users: [{ id: socket.id, name: data.name }],
+                preguntas: [],
+                respuestas: [],
+                enJuego: false
+            })
+        }
+        io.to(data.codigo).emit('lista-usuarios', salas.get(data.codigo).users);
+    })
+
+    socket.on('disconnect', () => {
+        if (socket.sala && salas.has(socket.sala)) {
+            const sala = salas.get(socket.sala);
+            sala.users = sala.users.filter(user => user.id !== socket.id);
+            if (sala.users.length === 0) {
+                salas.delete(socket.sala);
+            } else {
+                io.to(socket.sala).emit('lista-usuarios', sala.users);
+            }
+        }
     });
-    socket.on('crear-sala', (data) => {
-        salas.set(data, {
-            users: [],
-            enJuego: false
-        })
-        const newSocket = io.of(data);
-        newSocket.on('connection', (socketSala) => {
-            const sala = salas.get(data);
+    socket.on('empezar', () => {
+        if (socket.sala) {
+            io.to(socket.sala).emit('empezar');
+            const sala = salas.get(socket.sala);
+            sala.enJuego = true;
+        }
+    })
+    socket.on('enviar-pregunta', (data) => {
+        if (socket.sala) {
+            const sala = salas.get(socket.sala);
+            sala.preguntas.push({ id: socket.id, description: data });
+            if (sala.preguntas.length != sala.users.length)
+                return io.to(socket.sala).emit('cantidad-preguntas', sala.users.length - sala.preguntas.length);;
+            io.to(socket.sala).emit('responder-preguntas', sala.preguntas);
+        }
+    })
+    socket.on('enviar-respuestas', (data) => {
+        if (socket.sala) {
+            const sala = salas.get(socket.sala);
+            sala.respuestas.push(data);
+            if (sala.respuestas.length != sala.users.length)
+                return io.to(socket.sala).emit('cantidad-respuestas', sala.users.length - sala.respuestas.length);;
 
-            socketSala.on('enviar-nombre', name => {
-                if (sala && sala.users) {
-                    if (sala.enJuego) {
-                        socketSala.emit('esperar');
-                    } else {
-                        sala.users.push({
-                            id: socketSala.id,
-                            name: name
-                        })
-                        newSocket.emit('lista-usuarios', sala.users);
+            let resultados = [];
+
+            for (let p of sala.preguntas) {
+                let aux = {};
+                aux.id = p.id;
+                aux.pregunta = p.description;
+                aux.respuestas = []
+                for (let r of sala.respuestas) {
+                    for (let key in r) {
+                        if (key == p.id) {
+                            aux.respuestas.push(r[key]);
+                        }
                     }
                 }
-            })
+                resultados.push(aux);
+            }
+            io.to(socket.sala).emit('resultados', resultados);
+        }
+    })
 
-            socketSala.on('disconnect', () => {
-                if (sala && sala.users) {
-                    sala.users = sala.users.filter(x => x.id != socketSala.id);
-                    newSocket.emit('lista-usuarios', sala.users);
-                    if (sala.users.length === 0) {
-                        salas.delete(data);
-                    }
-                }
-            })
-
-            socketSala.on('empezar', () => {
-                sala.enJuego = true;
-                newSocket.emit('empezar');
-            })
-
-            socketSala.on('enviar-pregunta', (pregunta) => {
-                let user = sala.users.find(x => x.id == socketSala.id);
-                user.pregunta = pregunta;
-                for (let u of sala.users) {
-                    if (!u.pregunta || u.pregunta.trim() == "") return;
-                }
-                newSocket.emit('responder-preguntas', sala.users);
-            })
-
-            socketSala.on('enviar-respuestas', data => {
-                let user = sala.users.find(x => x.id == socketSala.id);
-                user.results = data;
-                for (let u of sala.users) {
-                    if (!u.results || u.results.length <= 0) return;
-                }
-                newSocket.emit('resultados', sala.users);
-            })
-
-            socketSala.on('reiniciar', () => {
-                if (sala && sala.users) {
-                    for (let user of sala.users) {
-                        user.results = [];
-                        user.pregunta = '';
-                    }
-                    sala.enJuego = false;
-                    newSocket.emit('reiniciar');
-                }
-
-            })
-        })
+    socket.on('reiniciar', () => {
+        if (socket.sala) {
+            const sala = salas.get(socket.sala);
+            sala.preguntas = [];
+            sala.respuestas = [];
+            sala.enJuego = false;
+            io.to(socket.sala).emit('reiniciar');
+        }
     })
 })
 app.get('/', (req, res) => {
